@@ -66,6 +66,16 @@ check_fzf() {
   return 0
 }
 
+# Function to hide cursor
+hide_cursor() {
+  tput civis
+}
+
+# Function to show cursor
+show_cursor() {
+  tput cnorm
+}
+
 # Function for custom menu with proper vim keybindings
 display_menu() {
   local title="$1"
@@ -135,12 +145,18 @@ display_menu() {
 
 # Full screen terminal UI mode
 run_tui_mode() {
+  # Hide cursor when entering TUI mode
+  hide_cursor
+  
+  # Setup trap to restore cursor on exit
+  trap show_cursor EXIT INT TERM
+  
   # First check if fzf is installed (still needed for command browsing)
   if ! check_fzf; then
     echo -e "${YELLOW}FZF is required for command browsing in TUI mode.${RESET}"
-    echo -e "${YELLOW}Falling back to basic interactive mode.${RESET}"
+    echo -e "${YELLOW}Cannot continue without FZF installed.${RESET}"
     sleep 2
-    interactive_add
+    show_cursor
     return
   fi
   
@@ -167,6 +183,7 @@ run_tui_mode() {
   if [ $menu_status -eq 255 ]; then
     # User pressed escape or 'q'
     echo -e "${GREEN}Exiting TUI mode.${RESET}"
+    show_cursor
     return
   elif [ $menu_status -lt ${#options[@]} ]; then
     case $menu_status in
@@ -176,7 +193,7 @@ run_tui_mode() {
       3) tui_delete_command ;;
       4) tui_export_commands ;;
       5) tui_import_commands ;;
-      6) echo -e "${GREEN}Exiting TUI mode.${RESET}"; return ;;
+      6) echo -e "${GREEN}Exiting TUI mode.${RESET}"; show_cursor; return ;;
     esac
   fi
   
@@ -250,6 +267,9 @@ tui_view_commands() {
   local confirm_status=$?
   
   if [ $confirm_status -eq 0 ]; then
+    # Show cursor while running command
+    show_cursor
+    
     # Clear screen for command output
     clear
     echo -e "${CYAN}Running: ${GREEN}$command_to_run${RESET}"
@@ -259,6 +279,9 @@ tui_view_commands() {
     echo -e "${GREEN}Command execution completed.${RESET}"
     echo
     read -n 1 -s -r -p "Press any key to continue..."
+    
+    # Hide cursor when returning to TUI
+    hide_cursor
   fi
 }
 
@@ -315,7 +338,9 @@ select_category() {
       return 0
     elif [ $menu_status -eq ${#options[@]} ]; then
       # New Category selected
+      show_cursor
       read -p "$(echo -e "${YELLOW}Enter new category name:${RESET} ")" new_category
+      hide_cursor
       echo "${new_category:-general}"
       return 0
     else
@@ -325,7 +350,9 @@ select_category() {
   else
     if [ $menu_status -eq $((${#options[@]}-1)) ] && [ "$include_new" = "true" ]; then
       # New Category selected
+      show_cursor
       read -p "$(echo -e "${YELLOW}Enter new category name:${RESET} ")" new_category
+      hide_cursor
       echo "${new_category:-general}"
       return 0
     else
@@ -344,11 +371,15 @@ tui_add_command() {
   echo -e "${CYAN}${BOLD}Add a New Command${RESET}"
   echo -e "${CYAN}─────────────────────${RESET}"
   
+  # Show cursor for input
+  show_cursor
+  
   # Command name (required)
   read -p "$(echo -e "${YELLOW}Command name:${RESET} ")" name
   if [ -z "$name" ]; then
     echo -e "${RED}Error: Command name cannot be empty.${RESET}"
     read -n 1 -s -r -p "Press any key to continue..."
+    hide_cursor
     return
   fi
   
@@ -356,6 +387,7 @@ tui_add_command() {
   if jq -e ".commands[\"$name\"]" "$DB_FILE" > /dev/null 2>&1; then
     echo -e "${YELLOW}Command '$name' already exists. Use modify to update it.${RESET}"
     read -n 1 -s -r -p "Press any key to continue..."
+    hide_cursor
     return
   fi
   
@@ -364,11 +396,15 @@ tui_add_command() {
   if [ -z "$command_to_run" ]; then
     echo -e "${RED}Error: Command to run cannot be empty.${RESET}"
     read -n 1 -s -r -p "Press any key to continue..."
+    hide_cursor
     return
   fi
   
   # Description (optional)
   read -p "$(echo -e "${YELLOW}Description (optional):${RESET} ")" description
+  
+  # Hide cursor for menu navigation
+  hide_cursor
   
   # Select category using vim-like navigation
   category=$(select_category "Select Category for Command" false true)
@@ -435,6 +471,9 @@ tui_modify_command() {
   echo -e "${CYAN}${BOLD}Modifying Command: ${RESET}${GREEN}$name${RESET}"
   echo -e "${CYAN}─────────────────────────${RESET}"
   
+  # Show cursor for input
+  show_cursor
+  
   # Show current command and ask for new one
   echo -e "${CYAN}Current command:${RESET} ${GREEN}$current_command${RESET}"
   read -p "$(echo -e "${YELLOW}New command (leave empty to keep current):${RESET} ")" new_command
@@ -447,6 +486,9 @@ tui_modify_command() {
   
   # Show current category and available categories
   echo -e "${CYAN}Current category:${RESET} ${MAGENTA}$current_category${RESET}"
+  
+  # Hide cursor for menu navigation
+  hide_cursor
   
   # Select category using vim-like navigation
   category=$(select_category "Select New Category for Command" false true)
@@ -519,7 +561,14 @@ tui_delete_command() {
     [ -n "$description" ] && echo -e "  ${YELLOW}$description${RESET}"
     echo -e "  ${GREEN}$ $command_to_run${RESET}"
     
+    # Show cursor for input
+    show_cursor
+    
     read -p "$(echo -e "${RED}Are you sure you want to delete this command? (y/N):${RESET} ")" confirm
+    
+    # Hide cursor again
+    hide_cursor
+    
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
       # Delete the command
       jq --arg name "$cmd_name" 'del(.commands[$name])' "$DB_FILE" > "$DB_FILE.tmp" && mv "$DB_FILE.tmp" "$DB_FILE"
@@ -545,12 +594,18 @@ tui_export_commands() {
   timestamp=$(date +"%Y%m%d_%H%M%S")
   default_filename="toolbox_export_${timestamp}.json"
   
+  # Show cursor for input
+  show_cursor
+  
   # Ask for filename
   read -p "$(echo -e "${YELLOW}Export filename (default: $default_filename):${RESET} ")" filename
   filename="${filename:-$default_filename}"
   
   # Add json extension if not present
   [[ "$filename" != *.json ]] && filename="${filename}.json"
+  
+  # Hide cursor for menu
+  hide_cursor
   
   # Select category using vim-like navigation
   category=$(select_category "Select Category to Export")
@@ -583,7 +638,14 @@ tui_import_commands() {
   if [ -z "$export_files" ]; then
     echo -e "${RED}No export files found in $EXPORT_DIR${RESET}"
     echo -e "${YELLOW}You can also provide a full path to a json file.${RESET}"
+    
+    # Show cursor for input
+    show_cursor
+    
     read -p "$(echo -e "${YELLOW}Enter path to json file:${RESET} ")" filename
+    
+    # Hide cursor again
+    hide_cursor
     
     if [ -z "$filename" ]; then
       echo -e "${RED}No file specified, import cancelled.${RESET}"
@@ -635,64 +697,6 @@ add_command() {
      "$DB_FILE" > "$DB_FILE.tmp" && mv "$DB_FILE.tmp" "$DB_FILE"
   
   echo -e "${GREEN}✓ Command '${BOLD}$name${RESET}${GREEN}' added successfully.${RESET}"
-}
-
-# Interactive command addition
-interactive_add() {
-  echo -e "${CYAN}${BOLD}Add a New Command${RESET}"
-  echo -e "${CYAN}─────────────────────${RESET}"
-  
-  read -p "$(echo -e "${YELLOW}Command name:${RESET} ")" name
-  if [ -z "$name" ]; then
-    echo -e "${RED}Error: Command name cannot be empty.${RESET}"
-    return 1
-  fi
-  
-  # Check if command already exists
-  if jq -e ".commands[\"$name\"]" "$DB_FILE" > /dev/null 2>&1; then
-    echo -e "${YELLOW}Command '$name' already exists. Use modify to update it.${RESET}"
-    return 1
-  fi
-  
-  read -p "$(echo -e "${YELLOW}Command to run:${RESET} ")" command_to_run
-  if [ -z "$command_to_run" ]; then
-    echo -e "${RED}Error: Command to run cannot be empty.${RESET}"
-    return 1
-  fi
-  
-  read -p "$(echo -e "${YELLOW}Description (optional):${RESET} ")" description
-  
-  # Show available categories and let user choose
-  available_categories=$(jq -r '.commands | map(.category) | unique | .[]' "$DB_FILE" 2>/dev/null)
-  if [ -n "$available_categories" ]; then
-    echo -e "${YELLOW}Available categories:${RESET}"
-    echo "$available_categories" | nl -w2 -s') '
-    echo "n) Create new category"
-  fi
-  
-  read -p "$(echo -e "${YELLOW}Category (number, name, or 'n' for new):${RESET} ")" category_choice
-  
-  if [[ "$category_choice" =~ ^[0-9]+$ ]] && [ -n "$available_categories" ]; then
-    # User selected a number
-    category=$(echo "$available_categories" | sed -n "${category_choice}p")
-    if [ -z "$category" ]; then
-      category="general"
-    fi
-  elif [ "$category_choice" = "n" ]; then
-    # User wants to create a new category
-    read -p "$(echo -e "${YELLOW}New category name:${RESET} ")" category
-    if [ -z "$category" ]; then
-      category="general"
-    fi
-  elif [ -n "$category_choice" ]; then
-    # User entered a category name
-    category="$category_choice"
-  else
-    # Default category
-    category="general"
-  fi
-  
-  add_command "$name" "$command_to_run" "$description" "$category"
 }
 
 # Function to list commands
@@ -838,76 +842,6 @@ modify_command() {
   echo -e "${GREEN}✓ Command '${BOLD}$name${RESET}${GREEN}' updated successfully.${RESET}"
 }
 
-# Interactive command modification
-interactive_modify() {
-  echo -e "${CYAN}${BOLD}Modify an Existing Command${RESET}"
-  echo -e "${CYAN}─────────────────────────${RESET}"
-  
-  read -p "$(echo -e "${YELLOW}Command name to modify:${RESET} ")" name
-  if [ -z "$name" ]; then
-    echo -e "${RED}Error: Command name cannot be empty.${RESET}"
-    return 1
-  fi
-  
-  # Check if command exists
-  if ! jq -e ".commands[\"$name\"]" "$DB_FILE" > /dev/null 2>&1; then
-    echo -e "${RED}Command '$name' not found.${RESET}"
-    return 1
-  fi
-  
-  # Get current values
-  current_command=$(jq -r ".commands[\"$name\"].command" "$DB_FILE")
-  current_description=$(jq -r ".commands[\"$name\"].description" "$DB_FILE")
-  current_category=$(jq -r ".commands[\"$name\"].category" "$DB_FILE")
-  
-  echo -e "${CYAN}Current command:${RESET} ${GREEN}$current_command${RESET}"
-  read -p "$(echo -e "${YELLOW}New command (leave empty to keep current):${RESET} ")" new_command
-  command_to_use="${new_command:-$current_command}"
-  
-  echo -e "${CYAN}Current description:${RESET} ${YELLOW}$current_description${RESET}"
-  read -p "$(echo -e "${YELLOW}New description (leave empty to keep current):${RESET} ")" new_description
-  description_to_use="${new_description:-$current_description}"
-  
-  echo -e "${CYAN}Current category:${RESET} ${MAGENTA}$current_category${RESET}"
-  
-  # Show available categories and let user choose
-  available_categories=$(jq -r '.commands | map(.category) | unique | .[]' "$DB_FILE" 2>/dev/null)
-  if [ -n "$available_categories" ]; then
-    echo -e "${YELLOW}Available categories:${RESET}"
-    echo "$available_categories" | nl -w2 -s') '
-    echo "n) Create new category"
-    echo "k) Keep current category"
-  fi
-  
-  read -p "$(echo -e "${YELLOW}Category (number, name, 'n' for new, 'k' to keep):${RESET} ")" category_choice
-  
-  if [ "$category_choice" = "k" ] || [ -z "$category_choice" ]; then
-    # Keep current category
-    category_to_use="$current_category"
-  elif [[ "$category_choice" =~ ^[0-9]+$ ]] && [ -n "$available_categories" ]; then
-    # User selected a number
-    category=$(echo "$available_categories" | sed -n "${category_choice}p")
-    category_to_use="${category:-$current_category}"
-  elif [ "$category_choice" = "n" ]; then
-    # User wants to create a new category
-    read -p "$(echo -e "${YELLOW}New category name:${RESET} ")" new_category
-    category_to_use="${new_category:-$current_category}"
-  else
-    # User entered a category name
-    category_to_use="$category_choice"
-  fi
-  
-  # Update the command
-  jq --arg name "$name" \
-     --arg cmd "$command_to_use" \
-     --arg desc "$description_to_use" \
-     --arg cat "$category_to_use" \
-     '.commands[$name] = {"command": $cmd, "description": $desc, "category": $cat}' \
-     "$DB_FILE" > "$DB_FILE.tmp" && mv "$DB_FILE.tmp" "$DB_FILE"
-  
-  echo -e "${GREEN}✓ Command '${BOLD}$name${RESET}${GREEN}' updated successfully.${RESET}"
-}
-
 # Function to list categories
 list_categories() {
   # Check if there are any commands
@@ -1004,7 +938,6 @@ show_usage() {
   echo -e "  ${YELLOW}tui${RESET}                      Start full-screen terminal user interface"
   echo -e "  ${YELLOW}add${RESET} NAME COMMAND [-d DESCRIPTION] [-c CATEGORY]"
   echo -e "                           Add a new command shortcut"
-  echo -e "  ${YELLOW}interactive${RESET}                Interactive mode for adding/modifying commands"
   echo -e "  ${YELLOW}list${RESET} [-c CATEGORY] [-s SEARCH]"
   echo -e "                           List saved commands"
   echo -e "  ${YELLOW}run${RESET} NAME                 Run a saved command"
@@ -1020,7 +953,6 @@ show_usage() {
   echo -e "${BOLD}${CYAN}Examples:${RESET}"
   echo -e "  toolbox tui"
   echo -e "  toolbox add list-ports \"lsof -i -P -n | grep LISTEN\" -d \"List all listening ports\" -c \"network\""
-  echo -e "  toolbox interactive"
   echo -e "  toolbox list"
   echo -e "  toolbox list -c network"
   echo -e "  toolbox run list-ports"
@@ -1074,14 +1006,6 @@ main() {
       done
       
       add_command "$name" "$command_to_run" "$description" "$category"
-      ;;
-    
-    interactive)
-      if [ "$1" = "modify" ]; then
-        interactive_modify
-      else
-        interactive_add
-      fi
       ;;
     
     list)
@@ -1140,12 +1064,10 @@ main() {
       name="$1"
       shift
       
-      # If no additional arguments, go to interactive mode
+      # If no additional arguments, go to TUI mode
       if [ $# -eq 0 ]; then
-        # Call interactive modify with the command name
-        name_temp="$name"
-        interactive_modify "$name_temp"
-        return
+        echo -e "${YELLOW}For interactive modification, please use 'toolbox tui' and select 'Modify Command'.${RESET}"
+        exit 0
       fi
       
       new_command=""
