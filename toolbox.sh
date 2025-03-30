@@ -53,6 +53,566 @@ check_dependencies() {
   fi
 }
 
+# Function to check if fzf is installed (needed for TUI mode)
+check_fzf() {
+  if ! command -v fzf &> /dev/null; then
+    echo -e "${RED}Error: fzf is required for TUI mode but not installed.${RESET}"
+    echo "Please install fzf to use the TUI features."
+    echo "On macOS with Homebrew: brew install fzf"
+    echo "On Debian/Ubuntu: sudo apt install fzf"
+    echo "Or visit: https://github.com/junegunn/fzf#installation"
+    return 1
+  fi
+  return 0
+}
+
+# Function for custom menu with proper vim keybindings
+display_menu() {
+  local title="$1"
+  shift
+  local options=("$@")
+  local selected=0
+  local key
+  local ARROW_UP=$'\e[A'
+  local ARROW_DOWN=$'\e[B'
+  
+  # Save cursor position
+  tput sc
+  
+  while true; do
+    # Clear previous menu (restore cursor position)
+    tput rc
+    tput ed
+    
+    # Print title
+    echo -e "${CYAN}${BOLD}$title${RESET}"
+    echo -e "${CYAN}─────────────────────${RESET}"
+    echo -e "${YELLOW}Use j/k or arrow keys to navigate, Enter to select, q to quit${RESET}"
+    echo
+    
+    # Display menu options
+    for i in "${!options[@]}"; do
+      if [ $i -eq $selected ]; then
+        echo -e "${GREEN}${BOLD}> ${options[$i]}${RESET}"
+      else
+        echo -e "  ${options[$i]}"
+      fi
+    done
+    
+    # Read a single key press
+    read -rsn1 key
+    
+    # Handle ESC sequences for arrow keys
+    if [[ $key == $'\e' ]]; then
+      read -rsn2 -t 0.1 rest
+      key="$key$rest"
+    fi
+    
+    case "$key" in
+      'j'|$ARROW_DOWN)  # Down
+        selected=$((selected + 1))
+        if [ $selected -ge ${#options[@]} ]; then
+          selected=$((${#options[@]} - 1))
+        fi
+        ;;
+      'k'|$ARROW_UP)  # Up
+        selected=$((selected - 1))
+        if [ $selected -lt 0 ]; then
+          selected=0
+        fi
+        ;;
+      'q'|$'\e')  # Escape or 'q'
+        echo
+        return 255
+        ;;
+      '')  # Enter
+        echo
+        return $selected
+        ;;
+    esac
+  done
+}
+
+# Full screen terminal UI mode
+run_tui_mode() {
+  # First check if fzf is installed (still needed for command browsing)
+  if ! check_fzf; then
+    echo -e "${YELLOW}FZF is required for command browsing in TUI mode.${RESET}"
+    echo -e "${YELLOW}Falling back to basic interactive mode.${RESET}"
+    sleep 2
+    interactive_add
+    return
+  fi
+  
+  # Clear screen and show header
+  clear
+  show_logo
+  
+  # Menu options
+  local options=(
+    "View/Run Commands"
+    "Add New Command"
+    "Modify Command"
+    "Delete Command"
+    "Export Commands"
+    "Import Commands"
+    "Quit"
+  )
+  
+  # Display custom menu
+  display_menu "Toolbox TUI Mode" "${options[@]}"
+  local menu_status=$?
+  
+  # Handle menu selection
+  if [ $menu_status -eq 255 ]; then
+    # User pressed escape or 'q'
+    echo -e "${GREEN}Exiting TUI mode.${RESET}"
+    return
+  elif [ $menu_status -lt ${#options[@]} ]; then
+    case $menu_status in
+      0) tui_view_commands ;;
+      1) tui_add_command ;;
+      2) tui_modify_command ;;
+      3) tui_delete_command ;;
+      4) tui_export_commands ;;
+      5) tui_import_commands ;;
+      6) echo -e "${GREEN}Exiting TUI mode.${RESET}"; return ;;
+    esac
+  fi
+  
+  # Return to TUI mode after an action completes (recursive)
+  run_tui_mode
+}
+
+# Function to view commands using a custom browse interface with vim-like navigation
+tui_browse_commands() {
+  # Check if there are any commands
+  command_count=$(jq '.commands | length' "$DB_FILE")
+  if [ "$command_count" -eq 0 ]; then
+    echo -e "${YELLOW}No commands found. Add some first.${RESET}"
+    read -n 1 -s -r -p "Press any key to continue..."
+    return
+  fi
+  
+  # Create a temporary file that combines command name, description, and category
+  tmp_file=$(mktemp)
+  jq -r '.commands | to_entries[] | "\(.key)|\(.value.category)|\(.value.description)|\(.value.command)"' "$DB_FILE" > "$tmp_file"
+  
+  # Get number of commands
+  command_count=$(wc -l < "$tmp_file")
+  
+  # For now, still use fzf for command browsing as it has powerful search capabilities
+  # But provide a note about the vim keybindings
+  echo -e "${CYAN}${BOLD}Select a command to run:${RESET}"
+  echo -e "${YELLOW}In command browser: /${RESET}${GREEN}search term${RESET}${YELLOW} to search, j/k to navigate${RESET}"
+  
+  local selection
+  selection=$(cat "$tmp_file" | 
+    fzf --layout=reverse --height 100% --border \
+        --prompt="Select command to run: " \
+        --preview 'echo -e "\033[1;36mCommand:\033[0m {1}\n\033[1;33mCategory:\033[0m {2}\n\033[1;32mDescription:\033[0m {3}\n\033[1;34mCommand to run:\033[0m {4}"' \
+        --preview-window=right:40% \
+        --bind="ctrl-r:reload(cat \"$tmp_file\")" \
+        --bind="ctrl-q:abort" \
+        --header="j/k: Navigate | Enter: Select | q/ESC: Back | /: Search | ctrl-r: Refresh" \
+        --delimiter="|" \
+        --with-nth=1,2,3)
+  
+  # Clean up
+  rm "$tmp_file"
+  
+  # Return the selection
+  echo "$selection"
+}
+
+# Function to view and run commands in TUI mode
+tui_view_commands() {
+  local selection=$(tui_browse_commands)
+  
+  # If no selection, return
+  if [ -z "$selection" ]; then
+    return
+  fi
+  
+  # Parse the selection to get the command name
+  local cmd_name=$(echo "$selection" | cut -d'|' -f1)
+  
+  # Get the command to run
+  local command_to_run=$(jq -r ".commands[\"$cmd_name\"].command" "$DB_FILE")
+  
+  # Ask for confirmation before running
+  clear
+  echo -e "${CYAN}About to run:${RESET} ${GREEN}$command_to_run${RESET}"
+  
+  # Use custom confirmation dialog
+  local confirm_options=("Yes, run this command" "No, cancel")
+  display_menu "Run Command?" "${confirm_options[@]}"
+  local confirm_status=$?
+  
+  if [ $confirm_status -eq 0 ]; then
+    # Clear screen for command output
+    clear
+    echo -e "${CYAN}Running: ${GREEN}$command_to_run${RESET}"
+    echo -e "${YELLOW}─────────────────────────────────────${RESET}"
+    eval "$command_to_run"
+    echo -e "${YELLOW}─────────────────────────────────────${RESET}"
+    echo -e "${GREEN}Command execution completed.${RESET}"
+    echo
+    read -n 1 -s -r -p "Press any key to continue..."
+  fi
+}
+
+# Function for category selection with vim keybindings
+select_category() {
+  local title="$1"
+  local include_all="${2:-true}"
+  local include_new="${3:-true}"
+  
+  # Get available categories
+  local available_categories=$(jq -r '.commands | map(.category) | unique | .[]' "$DB_FILE" 2>/dev/null | sort)
+  
+  if [ -z "$available_categories" ]; then
+    if [ "$include_new" = "true" ]; then
+      echo "general"
+      return 0
+    else
+      return 1
+    fi
+  fi
+  
+  # Create array of options
+  local options=()
+  
+  if [ "$include_all" = "true" ]; then
+    options+=("All Categories")
+  fi
+  
+  # Add each category as an option
+  while IFS= read -r category; do
+    options+=("$category")
+  done <<< "$available_categories"
+  
+  if [ "$include_new" = "true" ]; then
+    options+=("[New Category]")
+  fi
+  
+  # Display menu
+  display_menu "$title" "${options[@]}"
+  local menu_status=$?
+  
+  if [ $menu_status -eq 255 ]; then
+    # User cancelled
+    return 1
+  fi
+  
+  # Calculate index based on whether "All Categories" is included
+  local selected_category
+  
+  if [ "$include_all" = "true" ]; then
+    if [ $menu_status -eq 0 ]; then
+      # All Categories selected
+      echo ""
+      return 0
+    elif [ $menu_status -eq ${#options[@]} ]; then
+      # New Category selected
+      read -p "$(echo -e "${YELLOW}Enter new category name:${RESET} ")" new_category
+      echo "${new_category:-general}"
+      return 0
+    else
+      # Regular category selected
+      selected_category="${options[$menu_status]}"
+    fi
+  else
+    if [ $menu_status -eq $((${#options[@]}-1)) ] && [ "$include_new" = "true" ]; then
+      # New Category selected
+      read -p "$(echo -e "${YELLOW}Enter new category name:${RESET} ")" new_category
+      echo "${new_category:-general}"
+      return 0
+    else
+      # Regular category selected
+      selected_category="${options[$menu_status]}"
+    fi
+  fi
+  
+  echo "$selected_category"
+  return 0
+}
+
+# Function to add a command in TUI mode
+tui_add_command() {
+  clear
+  echo -e "${CYAN}${BOLD}Add a New Command${RESET}"
+  echo -e "${CYAN}─────────────────────${RESET}"
+  
+  # Command name (required)
+  read -p "$(echo -e "${YELLOW}Command name:${RESET} ")" name
+  if [ -z "$name" ]; then
+    echo -e "${RED}Error: Command name cannot be empty.${RESET}"
+    read -n 1 -s -r -p "Press any key to continue..."
+    return
+  fi
+  
+  # Check if command already exists
+  if jq -e ".commands[\"$name\"]" "$DB_FILE" > /dev/null 2>&1; then
+    echo -e "${YELLOW}Command '$name' already exists. Use modify to update it.${RESET}"
+    read -n 1 -s -r -p "Press any key to continue..."
+    return
+  fi
+  
+  # Command to run (required)
+  read -p "$(echo -e "${YELLOW}Command to run:${RESET} ")" command_to_run
+  if [ -z "$command_to_run" ]; then
+    echo -e "${RED}Error: Command to run cannot be empty.${RESET}"
+    read -n 1 -s -r -p "Press any key to continue..."
+    return
+  fi
+  
+  # Description (optional)
+  read -p "$(echo -e "${YELLOW}Description (optional):${RESET} ")" description
+  
+  # Select category using vim-like navigation
+  category=$(select_category "Select Category for Command" false true)
+  status=$?
+  
+  if [ $status -ne 0 ]; then
+    echo -e "${YELLOW}Command addition cancelled.${RESET}"
+    read -n 1 -s -r -p "Press any key to continue..."
+    return
+  fi
+  
+  # Add the command
+  add_command "$name" "$command_to_run" "$description" "$category"
+  read -n 1 -s -r -p "Press any key to continue..."
+}
+
+# Function to modify a command in TUI mode
+tui_modify_command() {
+  # Check if there are any commands
+  command_count=$(jq '.commands | length' "$DB_FILE")
+  if [ "$command_count" -eq 0 ]; then
+    echo -e "${YELLOW}No commands found to modify.${RESET}"
+    read -n 1 -s -r -p "Press any key to continue..."
+    return
+  fi
+  
+  # Create a temporary file that combines command name, description, and category
+  tmp_file=$(mktemp)
+  jq -r '.commands | to_entries[] | "\(.key)|\(.value.category)|\(.value.description)|\(.value.command)"' "$DB_FILE" > "$tmp_file"
+  
+  # Choose a command to modify using fzf
+  clear
+  echo -e "${CYAN}${BOLD}Modify a Command${RESET}"
+  echo -e "${CYAN}─────────────────────${RESET}"
+  
+  local selection
+  selection=$(cat "$tmp_file" | 
+    fzf --layout=reverse --height 100% --border \
+        --prompt="Select command to modify: " \
+        --preview 'echo -e "\033[1;36mCommand:\033[0m {1}\n\033[1;33mCategory:\033[0m {2}\n\033[1;32mDescription:\033[0m {3}\n\033[1;34mCommand to run:\033[0m {4}"' \
+        --preview-window=right:40% \
+        --bind="ctrl-q:abort" \
+        --header="↑/↓:Navigate | Enter:Select | ESC/ctrl-q:Back" \
+        --delimiter="|" \
+        --with-nth=1,2,3)
+  
+  # Clean up
+  rm "$tmp_file"
+  
+  # If no selection, return
+  if [ -z "$selection" ]; then
+    return
+  fi
+  
+  # Parse the selection to get the command name
+  local name=$(echo "$selection" | cut -d'|' -f1)
+  
+  # Get current values
+  local current_command=$(jq -r ".commands[\"$name\"].command" "$DB_FILE")
+  local current_description=$(jq -r ".commands[\"$name\"].description" "$DB_FILE")
+  local current_category=$(jq -r ".commands[\"$name\"].category" "$DB_FILE")
+  
+  clear
+  echo -e "${CYAN}${BOLD}Modifying Command: ${RESET}${GREEN}$name${RESET}"
+  echo -e "${CYAN}─────────────────────────${RESET}"
+  
+  # Show current command and ask for new one
+  echo -e "${CYAN}Current command:${RESET} ${GREEN}$current_command${RESET}"
+  read -p "$(echo -e "${YELLOW}New command (leave empty to keep current):${RESET} ")" new_command
+  local command_to_use="${new_command:-$current_command}"
+  
+  # Show current description and ask for new one
+  echo -e "${CYAN}Current description:${RESET} ${YELLOW}$current_description${RESET}"
+  read -p "$(echo -e "${YELLOW}New description (leave empty to keep current):${RESET} ")" new_description
+  local description_to_use="${new_description:-$current_description}"
+  
+  # Show current category and available categories
+  echo -e "${CYAN}Current category:${RESET} ${MAGENTA}$current_category${RESET}"
+  
+  # Select category using vim-like navigation
+  category=$(select_category "Select New Category for Command" false true)
+  status=$?
+  
+  if [ $status -ne 0 ]; then
+    echo -e "${YELLOW}Command modification cancelled.${RESET}"
+    read -n 1 -s -r -p "Press any key to continue..."
+    return
+  fi
+  
+  # Update the command
+  jq --arg name "$name" \
+     --arg cmd "$command_to_use" \
+     --arg desc "$description_to_use" \
+     --arg cat "$category" \
+     '.commands[$name] = {"command": $cmd, "description": $desc, "category": $cat}' \
+     "$DB_FILE" > "$DB_FILE.tmp" && mv "$DB_FILE.tmp" "$DB_FILE"
+  
+  echo -e "${GREEN}✓ Command '${BOLD}$name${RESET}${GREEN}' updated successfully.${RESET}"
+  read -n 1 -s -r -p "Press any key to continue..."
+}
+
+# Function to delete a command in TUI mode
+tui_delete_command() {
+  # Check if there are any commands
+  command_count=$(jq '.commands | length' "$DB_FILE")
+  if [ "$command_count" -eq 0 ]; then
+    echo -e "${YELLOW}No commands found to delete.${RESET}"
+    read -n 1 -s -r -p "Press any key to continue..."
+    return
+  fi
+  
+  # Create a temporary file that combines command name, description, and category
+  tmp_file=$(mktemp)
+  jq -r '.commands | to_entries[] | "\(.key)|\(.value.category)|\(.value.description)|\(.value.command)"' "$DB_FILE" > "$tmp_file"
+  
+  # Choose a command to delete using fzf
+  clear
+  echo -e "${CYAN}${BOLD}Delete a Command${RESET}"
+  echo -e "${CYAN}─────────────────────${RESET}"
+  
+  local selection
+  selection=$(cat "$tmp_file" | 
+    fzf --layout=reverse --height 100% --border --multi \
+        --prompt="Select command(s) to delete (TAB to multi-select): " \
+        --preview 'echo -e "\033[1;36mCommand:\033[0m {1}\n\033[1;33mCategory:\033[0m {2}\n\033[1;32mDescription:\033[0m {3}\n\033[1;34mCommand to run:\033[0m {4}"' \
+        --preview-window=right:40% \
+        --bind="ctrl-q:abort" \
+        --header="↑/↓:Navigate | TAB:Select multiple | Enter:Delete | ESC/ctrl-q:Back" \
+        --delimiter="|" \
+        --with-nth=1,2,3)
+  
+  # Clean up
+  rm "$tmp_file"
+  
+  # If no selection, return
+  if [ -z "$selection" ]; then
+    return
+  fi
+  
+  # Process each selected command
+  echo "$selection" | while IFS="|" read -r cmd_name category description command_to_run
+  do
+    # Confirm deletion
+    clear
+    echo -e "${RED}${BOLD}Confirm Deletion${RESET}"
+    echo -e "${YELLOW}About to delete:${RESET}"
+    echo -e "  ${CYAN}${BOLD}$cmd_name${RESET}"
+    [ -n "$description" ] && echo -e "  ${YELLOW}$description${RESET}"
+    echo -e "  ${GREEN}$ $command_to_run${RESET}"
+    
+    read -p "$(echo -e "${RED}Are you sure you want to delete this command? (y/N):${RESET} ")" confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+      # Delete the command
+      jq --arg name "$cmd_name" 'del(.commands[$name])' "$DB_FILE" > "$DB_FILE.tmp" && mv "$DB_FILE.tmp" "$DB_FILE"
+      echo -e "${GREEN}✓ Command '${BOLD}$cmd_name${RESET}${GREEN}' deleted successfully.${RESET}"
+    else
+      echo -e "${YELLOW}Deletion cancelled for '$cmd_name'.${RESET}"
+    fi
+    
+    echo
+    sleep 1
+  done
+  
+  read -n 1 -s -r -p "Press any key to continue..."
+}
+
+# Function to export commands in TUI mode
+tui_export_commands() {
+  clear
+  echo -e "${CYAN}${BOLD}Export Commands${RESET}"
+  echo -e "${CYAN}─────────────────────${RESET}"
+  
+  # Generate default filename with timestamp
+  timestamp=$(date +"%Y%m%d_%H%M%S")
+  default_filename="toolbox_export_${timestamp}.json"
+  
+  # Ask for filename
+  read -p "$(echo -e "${YELLOW}Export filename (default: $default_filename):${RESET} ")" filename
+  filename="${filename:-$default_filename}"
+  
+  # Add json extension if not present
+  [[ "$filename" != *.json ]] && filename="${filename}.json"
+  
+  # Select category using vim-like navigation
+  category=$(select_category "Select Category to Export")
+  status=$?
+  
+  if [ $status -ne 0 ]; then
+    echo -e "${YELLOW}Export cancelled.${RESET}"
+    read -n 1 -s -r -p "Press any key to continue..."
+    return
+  fi
+  
+  # Export commands
+  export_commands "$filename" "$category"
+  
+  read -n 1 -s -r -p "Press any key to continue..."
+}
+
+# Function to import commands in TUI mode
+tui_import_commands() {
+  clear
+  echo -e "${CYAN}${BOLD}Import Commands${RESET}"
+  echo -e "${CYAN}─────────────────────${RESET}"
+  
+  # List available export files
+  echo -e "${YELLOW}Select a file to import:${RESET}"
+  
+  # Find all json files in the export directory
+  export_files=$(find "$EXPORT_DIR" -name "*.json" -type f 2>/dev/null | sort -r)
+  
+  if [ -z "$export_files" ]; then
+    echo -e "${RED}No export files found in $EXPORT_DIR${RESET}"
+    echo -e "${YELLOW}You can also provide a full path to a json file.${RESET}"
+    read -p "$(echo -e "${YELLOW}Enter path to json file:${RESET} ")" filename
+    
+    if [ -z "$filename" ]; then
+      echo -e "${RED}No file specified, import cancelled.${RESET}"
+      read -n 1 -s -r -p "Press any key to continue..."
+      return
+    fi
+  else
+    # Show the exports list using fzf
+    filename=$(echo "$export_files" | 
+      fzf --height 15 --layout=reverse --border \
+          --prompt="Select file to import: " \
+          --header="↑/↓:Navigate | Enter:Select | ESC:Cancel" \
+          --preview "jq -r '.commands | length' {} | xargs echo 'Commands in file:' ; 
+                    jq -r '.commands | map(.category) | unique | .[]' {} | sort | xargs echo 'Categories:'"
+    )
+    
+    if [ -z "$filename" ]; then
+      echo -e "${YELLOW}Import cancelled.${RESET}"
+      read -n 1 -s -r -p "Press any key to continue..."
+      return
+    fi
+  fi
+  
+  # Import the selected file
+  import_commands "$filename"
+  
+  read -n 1 -s -r -p "Press any key to continue..."
+}
+
 # Function to add a new command
 add_command() {
   name="$1"
@@ -441,6 +1001,7 @@ show_usage() {
   echo -e "${BOLD}${CYAN}Usage:${RESET} toolbox COMMAND [ARGS]"
   echo
   echo -e "${BOLD}${CYAN}Commands:${RESET}"
+  echo -e "  ${YELLOW}tui${RESET}                      Start full-screen terminal user interface"
   echo -e "  ${YELLOW}add${RESET} NAME COMMAND [-d DESCRIPTION] [-c CATEGORY]"
   echo -e "                           Add a new command shortcut"
   echo -e "  ${YELLOW}interactive${RESET}                Interactive mode for adding/modifying commands"
@@ -457,6 +1018,7 @@ show_usage() {
   echo -e "  ${YELLOW}help${RESET}                     Show this help message"
   echo
   echo -e "${BOLD}${CYAN}Examples:${RESET}"
+  echo -e "  toolbox tui"
   echo -e "  toolbox add list-ports \"lsof -i -P -n | grep LISTEN\" -d \"List all listening ports\" -c \"network\""
   echo -e "  toolbox interactive"
   echo -e "  toolbox list"
@@ -474,6 +1036,10 @@ main() {
   shift || true
   
   case "$cmd" in
+    tui)
+      run_tui_mode
+      ;;
+    
     add)
       if [ $# -lt 2 ]; then
         echo -e "${RED}Error: 'add' requires NAME and COMMAND arguments.${RESET}"
