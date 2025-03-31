@@ -7,6 +7,7 @@
 CONFIG_DIR="$HOME/.toolbox"
 DB_FILE="$CONFIG_DIR/commands.json"
 EXPORT_DIR="$CONFIG_DIR/exports"
+TOOLBOX_USE_FZF=${TOOLBOX_USE_FZF:-false}
 
 # Color definitions
 RED="\033[0;31m"
@@ -522,64 +523,128 @@ tui_delete_command() {
     return
   fi
   
-  # Create a temporary file that combines command name, description, and category
-  tmp_file=$(mktemp)
-  jq -r '.commands | to_entries[] | "\(.key)|\(.value.category)|\(.value.description)|\(.value.command)"' "$DB_FILE" > "$tmp_file"
-  
-  # Choose a command to delete using fzf
-  clear
-  echo -e "${CYAN}${BOLD}Delete a Command${RESET}"
-  echo -e "${CYAN}─────────────────────${RESET}"
-  
-  local selection
-  selection=$(cat "$tmp_file" | 
-    fzf --layout=reverse --height 100% --border --multi \
-        --prompt="Select command(s) to delete (TAB to multi-select): " \
-        --preview 'echo -e "\033[1;36mCommand:\033[0m {1}\n\033[1;33mCategory:\033[0m {2}\n\033[1;32mDescription:\033[0m {3}\n\033[1;34mCommand to run:\033[0m {4}"' \
-        --preview-window=right:40% \
-        --bind="ctrl-q:abort" \
-        --header="↑/↓:Navigate | TAB:Select multiple | Enter:Delete | ESC/ctrl-q:Back" \
-        --delimiter="|" \
-        --with-nth=1,2,3)
-  
-  # Clean up
-  rm "$tmp_file"
-  
-  # If no selection, return
-  if [ -z "$selection" ]; then
-    return
+  # Check if we should use FZF
+  use_fzf=false
+  if check_fzf >/dev/null 2>&1 && [ "${TOOLBOX_USE_FZF:-false}" = "true" ]; then
+    use_fzf=true
   fi
   
-  # Process each selected command
-  echo "$selection" | while IFS="|" read -r cmd_name category description command_to_run
-  do
-    # Confirm deletion
+  if [ "$use_fzf" = "true" ]; then
+    # Create a temporary file that combines command name, description, and category
+    tmp_file=$(mktemp)
+    jq -r '.commands | to_entries[] | "\(.key)|\(.value.category)|\(.value.description)|\(.value.command)"' "$DB_FILE" > "$tmp_file"
+    
+    # Choose a command to delete using fzf
+    clear
+    echo -e "${CYAN}${BOLD}Delete a Command${RESET}"
+    echo -e "${CYAN}─────────────────────${RESET}"
+    
+    selection=$(cat "$tmp_file" | 
+      fzf --layout=reverse --height 100% --border --multi \
+          --prompt="Select command(s) to delete (TAB to multi-select): " \
+          --preview 'echo -e "\033[1;36mCommand:\033[0m {1}\n\033[1;33mCategory:\033[0m {2}\n\033[1;32mDescription:\033[0m {3}\n\033[1;34mCommand to run:\033[0m {4}"' \
+          --preview-window=right:40% \
+          --bind="ctrl-q:abort" \
+          --header="↑/↓:Navigate | TAB:Select multiple | Enter:Delete | ESC/ctrl-q:Back" \
+          --delimiter="|" \
+          --with-nth=1,2,3)
+    
+    # If no selection, return
+    if [ -z "$selection" ]; then
+      rm "$tmp_file"
+      return
+    fi
+    
+    # Process each selected line - FZF can select multiple
+    echo "$selection" | while IFS='|' read -r cmd_name category description command_to_run; do
+      # Skip empty lines
+      [ -z "$cmd_name" ] && continue
+      
+      # Confirm deletion
+      clear
+      echo -e "${RED}${BOLD}Confirm Deletion${RESET}"
+      echo -e "${YELLOW}About to delete:${RESET}"
+      echo -e "  ${CYAN}${BOLD}$cmd_name${RESET}"
+      [ -n "$description" ] && echo -e "  ${YELLOW}$description${RESET}"
+      echo -e "  ${GREEN}$ $command_to_run${RESET}"
+      
+      # Since we're in a pipeline, we need to use a temporary file for interaction
+      confirm_delete=false
+      # Use custom confirmation dialog with separate local variables
+      local confirm_options=("Yes, delete this command" "No, cancel")
+      display_menu "Are you sure?" "${confirm_options[@]}"
+      local menu_result=$?
+      
+      if [ $menu_result -eq 0 ]; then
+        # Delete the command
+        jq --arg name "$cmd_name" 'del(.commands[$name])' "$DB_FILE" > "$DB_FILE.tmp" && mv "$DB_FILE.tmp" "$DB_FILE"
+        echo -e "${GREEN}✓ Command '${BOLD}$cmd_name${RESET}${GREEN}' deleted successfully.${RESET}"
+      else
+        echo -e "${YELLOW}Deletion cancelled for '$cmd_name'.${RESET}"
+      fi
+      
+      sleep 1
+    done
+    
+    # Clean up
+    rm -f "$tmp_file"
+  else
+    # Use standard menu for command selection (single command)
+    clear
+    echo -e "${CYAN}${BOLD}Delete a Command${RESET}"
+    echo -e "${CYAN}─────────────────────${RESET}"
+    
+    # Get list of commands
+    cmd_names=$(jq -r '.commands | keys[]' "$DB_FILE" | sort)
+    cmd_array=()
+    
+    while IFS= read -r cmd_name; do
+      cmd_desc=$(jq -r ".commands[\"$cmd_name\"].description" "$DB_FILE")
+      cmd_cat=$(jq -r ".commands[\"$cmd_name\"].category" "$DB_FILE")
+      cmd_display="${cmd_name} [${cmd_cat}]"
+      [ -n "$cmd_desc" ] && cmd_display="${cmd_display} - ${cmd_desc}"
+      cmd_array+=("$cmd_display")
+    done <<< "$cmd_names"
+    
+    # Display menu for selection
+    display_menu "Select a command to delete" "${cmd_array[@]}"
+    menu_status=$?
+    
+    if [ $menu_status -eq 255 ]; then
+      # User cancelled
+      return
+    fi
+    
+    # Get the selected command name from the display string
+    selected_cmd_display="${cmd_array[$menu_status]}"
+    selected_cmd_name=$(echo "$selected_cmd_display" | sed -E 's/^([^ ]+).*/\1/')
+    
+    # Get command details
+    cmd_desc=$(jq -r ".commands[\"$selected_cmd_name\"].description" "$DB_FILE")
+    cmd_command=$(jq -r ".commands[\"$selected_cmd_name\"].command" "$DB_FILE")
+    cmd_cat=$(jq -r ".commands[\"$selected_cmd_name\"].category" "$DB_FILE")
+    
+    # Confirm deletion (directly without pipeline)
     clear
     echo -e "${RED}${BOLD}Confirm Deletion${RESET}"
     echo -e "${YELLOW}About to delete:${RESET}"
-    echo -e "  ${CYAN}${BOLD}$cmd_name${RESET}"
-    [ -n "$description" ] && echo -e "  ${YELLOW}$description${RESET}"
-    echo -e "  ${GREEN}$ $command_to_run${RESET}"
+    echo -e "  ${CYAN}${BOLD}$selected_cmd_name${RESET}"
+    [ -n "$cmd_desc" ] && echo -e "  ${YELLOW}$cmd_desc${RESET}"
+    echo -e "  ${GREEN}$ $cmd_command${RESET}"
     
-    # Show cursor for input
-    show_cursor
+    # Use custom confirmation dialog with unique variables
+    confirm_options=("Yes, delete this command" "No, cancel")
+    display_menu "Are you sure?" "${confirm_options[@]}"
+    confirm_status=$?
     
-    read -p "$(echo -e "${RED}Are you sure you want to delete this command? (y/N):${RESET} ")" confirm
-    
-    # Hide cursor again
-    hide_cursor
-    
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+    if [ $confirm_status -eq 0 ]; then
       # Delete the command
-      jq --arg name "$cmd_name" 'del(.commands[$name])' "$DB_FILE" > "$DB_FILE.tmp" && mv "$DB_FILE.tmp" "$DB_FILE"
-      echo -e "${GREEN}✓ Command '${BOLD}$cmd_name${RESET}${GREEN}' deleted successfully.${RESET}"
+      jq --arg name "$selected_cmd_name" 'del(.commands[$name])' "$DB_FILE" > "$DB_FILE.tmp" && mv "$DB_FILE.tmp" "$DB_FILE"
+      echo -e "${GREEN}✓ Command '${BOLD}$selected_cmd_name${RESET}${GREEN}' deleted successfully.${RESET}"
     else
-      echo -e "${YELLOW}Deletion cancelled for '$cmd_name'.${RESET}"
+      echo -e "${YELLOW}Deletion cancelled for '$selected_cmd_name'.${RESET}"
     fi
-    
-    echo
-    sleep 1
-  done
+  fi
   
   read -n 1 -s -r -p "Press any key to continue..."
 }
@@ -617,9 +682,7 @@ tui_export_commands() {
     return
   fi
   
-  # Export commands
   export_commands "$filename" "$category"
-  
   read -n 1 -s -r -p "Press any key to continue..."
 }
 
@@ -629,37 +692,23 @@ tui_import_commands() {
   echo -e "${CYAN}${BOLD}Import Commands${RESET}"
   echo -e "${CYAN}─────────────────────${RESET}"
   
-  # List available export files
-  echo -e "${YELLOW}Select a file to import:${RESET}"
-  
-  # Find all json files in the export directory
-  export_files=$(find "$EXPORT_DIR" -name "*.json" -type f 2>/dev/null | sort -r)
-  
-  if [ -z "$export_files" ]; then
-    echo -e "${RED}No export files found in $EXPORT_DIR${RESET}"
-    echo -e "${YELLOW}You can also provide a full path to a json file.${RESET}"
+  # Choose a file using fzf
+  if check_fzf >/dev/null 2>&1; then
+    echo -e "${YELLOW}Select a file to import:${RESET}"
     
-    # Show cursor for input
-    show_cursor
+    # List files in the export directory
+    files=$(find "$EXPORT_DIR" -type f -name "*.json" -exec basename {} \; | sort)
     
-    read -p "$(echo -e "${YELLOW}Enter path to json file:${RESET} ")" filename
-    
-    # Hide cursor again
-    hide_cursor
-    
-    if [ -z "$filename" ]; then
-      echo -e "${RED}No file specified, import cancelled.${RESET}"
+    if [ -z "$files" ]; then
+      echo -e "${YELLOW}No exported files found in $EXPORT_DIR${RESET}"
       read -n 1 -s -r -p "Press any key to continue..."
       return
     fi
-  else
-    # Show the exports list using fzf
-    filename=$(echo "$export_files" | 
-      fzf --height 15 --layout=reverse --border \
-          --prompt="Select file to import: " \
-          --header="↑/↓:Navigate | Enter:Select | ESC:Cancel" \
-          --preview "jq -r '.commands | length' {} | xargs echo 'Commands in file:' ; 
-                    jq -r '.commands | map(.category) | unique | .[]' {} | sort | xargs echo 'Categories:'"
+    
+    filename=$(echo "$files" | fzf --layout=reverse --height=10 --border \
+      --prompt="Select file to import: " \
+      --preview="jq -r '.commands | length' \"$EXPORT_DIR/{}\" | xargs echo 'Commands:' && \
+                 jq -r '.commands | map(.category) | unique | .[]' \"$EXPORT_DIR/{}\" | sort | xargs echo 'Categories:'"
     )
     
     if [ -z "$filename" ]; then
@@ -667,10 +716,19 @@ tui_import_commands() {
       read -n 1 -s -r -p "Press any key to continue..."
       return
     fi
+  else
+    # Show cursor for input
+    show_cursor
+    
+    # Manual file selection
+    read -p "$(echo -e "${YELLOW}Enter filename to import:${RESET} ")" filename
+    
+    # Hide cursor for menu
+    hide_cursor
   fi
   
   # Import the selected file
-  import_commands "$filename"
+  import_commands "$EXPORT_DIR/$filename"
   
   read -n 1 -s -r -p "Press any key to continue..."
 }
@@ -751,7 +809,7 @@ list_commands() {
   echo -e "\n${CYAN}${BOLD}╭${h_line}╮${RESET}"
   if [ -n "$category" ]; then
     # Calculate padding for centered text
-    header_text=" Commands in category ${MAGENTA}${BOLD}$category${RESET}${CYAN}${BOLD} ($result_count found) "
+    header_text=" Commands in category ${MAGENTA}${BOLD}$category${RESET}${CYAN}${BOLD} \($result_count found\) "
     # Strip color codes for length calculation using improved regex
     plain_text=$(echo -e "$header_text" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g")
     padding=$(( (box_width - ${#plain_text}) / 2 ))
@@ -761,7 +819,7 @@ list_commands() {
     right_pad=$(printf '%*s' $((box_width - ${#plain_text} - padding)) ' ')
     echo -e "${CYAN}${BOLD}│${RESET}${left_pad}${header_text}${right_pad}${CYAN}${BOLD}│${RESET}"
   elif [ -n "$search_term" ]; then
-    header_text=" Search results for ${YELLOW}${BOLD}\"$search_term\"${RESET}${CYAN}${BOLD} ($result_count found) "
+    header_text=" Search results for ${YELLOW}${BOLD}\"$search_term\"${RESET}${CYAN}${BOLD} \($result_count found\) "
     # Strip color codes using improved regex
     plain_text=$(echo -e "$header_text" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g")
     padding=$(( (box_width - ${#plain_text}) / 2 ))
@@ -770,7 +828,7 @@ list_commands() {
     right_pad=$(printf '%*s' $((box_width - ${#plain_text} - padding)) ' ')
     echo -e "${CYAN}${BOLD}│${RESET}${left_pad}${header_text}${right_pad}${CYAN}${BOLD}│${RESET}"
   else
-    header_text=" All Commands ${CYAN}${BOLD}($result_count in $cat_count categories) "
+    header_text=" All Commands ${CYAN}${BOLD}\($result_count in $cat_count categories\) "
     # Strip color codes using improved regex
     plain_text=$(echo -e "$header_text" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g")
     padding=$(( (box_width - ${#plain_text}) / 2 ))
