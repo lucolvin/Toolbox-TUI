@@ -62,7 +62,7 @@ ln -s "$(pwd)/Toolbox_TUI/toolbox.sh" /usr/local/bin/toolbox
 The easiest way to use Toolbox is through its Terminal User Interface:
 
 ```bash
-toolbox tui
+toolbox
 ```
 
 Navigate with:
@@ -93,7 +93,7 @@ toolbox delete list-ports
 
 | Command | Description |
 |---------|-------------|
-| `tui` | Start full-screen terminal user interface |
+| `toolbox` | Start full-screen terminal user interface |
 | `add NAME COMMAND [-d DESCRIPTION] [-c CATEGORY]` | Add a new command shortcut |
 | `list [-c CATEGORY] [-s SEARCH]` | List saved commands |
 | `run NAME` | Run a saved command |

@@ -737,20 +737,135 @@ list_commands() {
     return
   fi
   
-  # Group and display by category
+  # Get list of categories with counts
   categories=$(jq -r '[.[].category] | unique | .[]' "$tmp_file" | sort)
+  cat_count=$(echo "$categories" | wc -l | tr -d ' ')
   
+  # Define box width for consistent borders
+  box_width=50
+  
+  # Create horizontal line strings for reuse
+  h_line=$(printf '%.0s─' $(seq 1 $box_width))
+  
+  # Display header with summary
+  echo -e "\n${CYAN}${BOLD}╭${h_line}╮${RESET}"
+  if [ -n "$category" ]; then
+    # Calculate padding for centered text
+    header_text=" Commands in category ${MAGENTA}${BOLD}$category${RESET}${CYAN}${BOLD} ($result_count found) "
+    # Strip color codes for length calculation using improved regex
+    plain_text=$(echo -e "$header_text" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g")
+    padding=$(( (box_width - ${#plain_text}) / 2 ))
+    if [ $padding -lt 0 ]; then padding=0; fi
+    left_pad=$(printf '%*s' $padding ' ')
+    # Fix right padding calculation to ensure exact box width
+    right_pad=$(printf '%*s' $((box_width - ${#plain_text} - padding)) ' ')
+    echo -e "${CYAN}${BOLD}│${RESET}${left_pad}${header_text}${right_pad}${CYAN}${BOLD}│${RESET}"
+  elif [ -n "$search_term" ]; then
+    header_text=" Search results for ${YELLOW}${BOLD}\"$search_term\"${RESET}${CYAN}${BOLD} ($result_count found) "
+    # Strip color codes using improved regex
+    plain_text=$(echo -e "$header_text" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g")
+    padding=$(( (box_width - ${#plain_text}) / 2 ))
+    if [ $padding -lt 0 ]; then padding=0; fi
+    left_pad=$(printf '%*s' $padding ' ')
+    right_pad=$(printf '%*s' $((box_width - ${#plain_text} - padding)) ' ')
+    echo -e "${CYAN}${BOLD}│${RESET}${left_pad}${header_text}${right_pad}${CYAN}${BOLD}│${RESET}"
+  else
+    header_text=" All Commands ${CYAN}${BOLD}($result_count in $cat_count categories) "
+    # Strip color codes using improved regex
+    plain_text=$(echo -e "$header_text" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g")
+    padding=$(( (box_width - ${#plain_text}) / 2 ))
+    if [ $padding -lt 0 ]; then padding=0; fi
+    left_pad=$(printf '%*s' $padding ' ')
+    right_pad=$(printf '%*s' $((box_width - ${#plain_text} - padding)) ' ')
+    echo -e "${CYAN}${BOLD}│${RESET}${left_pad}${header_text}${right_pad}${CYAN}${BOLD}│${RESET}"
+  fi
+  echo -e "${CYAN}${BOLD}╰${h_line}╯${RESET}\n"
+  
+  # Group and display by category
   for cat in $categories; do
     # Using tr for uppercase instead of ${var^^} for better compatibility
     cat_upper=$(echo "$cat" | tr '[:lower:]' '[:upper:]')
-    echo -e "\n${MAGENTA}${BOLD}== $cat_upper ==${RESET}"
+    
+    # Box header for category
+    echo -e "${MAGENTA}${BOLD}┌─ $cat_upper ${h_line:$((${#cat_upper} + 3))}┐${RESET}"
+    
+    # Get commands in this category
     jq -r --arg cat "$cat" 'to_entries | map(select(.value.category == $cat)) | sort_by(.key) | .[] | 
       "\(.key)\t\(.value.command)\t\(.value.description)"' "$tmp_file" | 
       while IFS=$'\t' read -r cmd_name cmd_command cmd_desc; do
-        echo -e "  ${CYAN}${BOLD}$cmd_name${RESET}"
-        [ -n "$cmd_desc" ] && echo -e "    ${YELLOW}$cmd_desc${RESET}"
-        echo -e "    ${GREEN}$ $cmd_command${RESET}"
+        # Command name with icon - fill with spaces to right border
+        cmd_display=" ${CYAN}${BOLD}▶ $cmd_name${RESET}"
+        # Get actual width without color codes for padding calculation
+        plain_cmd=$(echo -e "$cmd_display" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g")
+        # Calculate padding precisely - adjusted to fix off-by-one error
+        right_pad=$((box_width - ${#plain_cmd}))
+        # Ensure we don't create negative padding
+        if [ $right_pad -lt 0 ]; then right_pad=0; fi
+        padding=$(printf '%*s' $right_pad ' ')
+        echo -e "${MAGENTA}│${RESET}${cmd_display}${padding}${MAGENTA}│${RESET}"
+        
+        # Description (if available)
+        if [ -n "$cmd_desc" ]; then
+          # Truncate long descriptions to fit in the box
+          desc_display="   ${YELLOW}$cmd_desc${RESET}"
+          # Get actual width without color codes
+          plain_desc=$(echo -e "$desc_display" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g")
+          
+          if [ ${#plain_desc} -gt $((box_width - 2)) ]; then
+            # Calculate visible text length (without color codes)
+            desc_text=${desc_display#*m}       # Remove first color code
+            desc_text=${desc_text%${RESET}}    # Remove reset code
+            visible_len=$((box_width - 6))
+            
+            # Truncate the visible text and add ellipsis
+            truncated_desc="   ${YELLOW}${desc_text:0:$visible_len}...${RESET}"
+            # Calculate padding based on visible length - adjusted
+            right_pad=$((box_width - visible_len - 6))
+            if [ $right_pad -lt 0 ]; then right_pad=0; fi
+            padding=$(printf '%*s' $right_pad ' ')
+            echo -e "${MAGENTA}│${RESET}${truncated_desc}${padding}${MAGENTA}│${RESET}"
+          else
+            # Normal padding for non-truncated descriptions - adjusted
+            right_pad=$((box_width - ${#plain_desc}))
+            if [ $right_pad -lt 0 ]; then right_pad=0; fi
+            padding=$(printf '%*s' $right_pad ' ')
+            echo -e "${MAGENTA}│${RESET}${desc_display}${padding}${MAGENTA}│${RESET}"
+          fi
+        fi
+        
+        # Command to run with subtle border (truncate if too long)
+        cmd_display="   ${GREEN}$ $cmd_command${RESET}"
+        # Get actual width without color codes
+        plain_cmd_run=$(echo -e "$cmd_display" | sed -r "s/\x1B\[([0-9]{1,3}(;[0-9]{1,3})*)?[mGK]//g")
+        
+        if [ ${#plain_cmd_run} -gt $((box_width - 2)) ]; then
+          # Calculate visible text length (without color codes)
+          cmd_text=${cmd_display#*m}       # Remove first color code
+          cmd_text=${cmd_text%${RESET}}    # Remove reset code
+          visible_len=$((box_width - 6))
+          
+          # Truncate the visible text and add ellipsis
+          truncated_cmd="   ${GREEN}${cmd_text:0:$visible_len}...${RESET}"
+          # Calculate padding based on visible length - adjusted
+          right_pad=$((box_width - visible_len - 6))
+          if [ $right_pad -lt 0 ]; then right_pad=0; fi
+          padding=$(printf '%*s' $right_pad ' ')
+          echo -e "${MAGENTA}│${RESET}${truncated_cmd}${padding}${MAGENTA}│${RESET}"
+        else
+          # Normal padding for non-truncated commands - adjusted
+          right_pad=$((box_width - ${#plain_cmd_run}))
+          if [ $right_pad -lt 0 ]; then right_pad=0; fi
+          padding=$(printf '%*s' $right_pad ' ')
+          echo -e "${MAGENTA}│${RESET}${cmd_display}${padding}${MAGENTA}│${RESET}"
+        fi
+        
+        # Add separator between commands in the same category - fixed padding calculation
+        padding=$(printf '%*s' $((box_width)) ' ')
+        echo -e "${MAGENTA}│${RESET}${padding}${MAGENTA}│${RESET}"
       done
+    
+    # Box footer
+    echo -e "${MAGENTA}${BOLD}└${h_line}┘${RESET}\n"
   done
   
   # Clean up
@@ -935,7 +1050,7 @@ show_usage() {
   echo -e "${BOLD}${CYAN}Usage:${RESET} toolbox COMMAND [ARGS]"
   echo
   echo -e "${BOLD}${CYAN}Commands:${RESET}"
-  echo -e "  ${YELLOW}tui${RESET}                      Start full-screen terminal user interface"
+  # Removed the "tui" command line since running without arguments enters TUI mode
   echo -e "  ${YELLOW}add${RESET} NAME COMMAND [-d DESCRIPTION] [-c CATEGORY]"
   echo -e "                           Add a new command shortcut"
   echo -e "  ${YELLOW}list${RESET} [-c CATEGORY] [-s SEARCH]"
@@ -951,7 +1066,7 @@ show_usage() {
   echo -e "  ${YELLOW}help${RESET}                     Show this help message"
   echo
   echo -e "${BOLD}${CYAN}Examples:${RESET}"
-  echo -e "  toolbox tui"
+  echo -e "  toolbox"
   echo -e "  toolbox add list-ports \"lsof -i -P -n | grep LISTEN\" -d \"List all listening ports\" -c \"network\""
   echo -e "  toolbox list"
   echo -e "  toolbox list -c network"
@@ -968,9 +1083,7 @@ main() {
   shift || true
   
   case "$cmd" in
-    tui)
-      run_tui_mode
-      ;;
+    # Removed the "tui" case since it's now handled by the default case
     
     add)
       if [ $# -lt 2 ]; then
@@ -1066,7 +1179,7 @@ main() {
       
       # If no additional arguments, go to TUI mode
       if [ $# -eq 0 ]; then
-        echo -e "${YELLOW}For interactive modification, please use 'toolbox tui' and select 'Modify Command'.${RESET}"
+        echo -e "${YELLOW}For interactive modification, please use 'toolbox' and select 'Modify Command'.${RESET}"
         exit 0
       fi
       
@@ -1144,7 +1257,7 @@ main() {
     
     *)
       if [ -z "$cmd" ]; then
-        show_usage
+        run_tui_mode
       else
         echo -e "${RED}Error: Unknown command '$cmd'.${RESET}"
         show_usage
