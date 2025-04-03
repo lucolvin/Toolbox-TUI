@@ -1,0 +1,5 @@
+#!/bin/bash
+
+# Simple launcher for Toolbox TUI
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+"$SCRIPT_DIR/toolbox.sh" "$@"
