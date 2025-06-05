@@ -23,6 +23,9 @@ With Toolbox, you can:
 - Browse and filter commands by category
 - Run commands directly from a user-friendly TUI (Terminal User Interface)
 - Import and export command collections to share with others
+- 
+> [!WARNING]
+> Toolbox is still in alpha development. Expect bugs and breaking changes.
 
 ## Features
 
