@@ -165,7 +165,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) for 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
 ---
-
-<div align="center">
-  <p>Made with ❤️ by Luke's Labs</p>
-</div>
